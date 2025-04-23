@@ -1,0 +1,1 @@
+gcc -g app.c -o app.bin

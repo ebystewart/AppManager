@@ -6,16 +6,25 @@
 #include <stdbool.h>
 #include <string.h>
 
+
+#define BIN_FILE_NAME_MAXLEN  50U
+#define BIN_PATH_MAXLEN      150U
+#define BIN_ARGS_MAXLEN      250U
+
+#define min(a,b)  (a < b ? a : b)
+      
+
 typedef struct{
-    char *binName;
-    char *binPath;
-    char *arguments;
+    char binName[BIN_FILE_NAME_MAXLEN];
+    char binPath[BIN_PATH_MAXLEN];
+    char arguments[BIN_ARGS_MAXLEN];
     uint32_t uid;
     uint32_t gid;
     uint32_t pid;
 }AppAttributes_t;
 
 static bool_t parse_app(FILE *fd);
+static void run_app(AppAttributes_t *appAttr);
 static void print_options(void);
 static void parse_attributes(char *sptr, unsigned int str_len);
 
@@ -129,52 +138,70 @@ static bool_t parse_app(FILE *fd)
 static void parse_attributes(char *sptr, unsigned int str_len)
 {
     char *cptr;
+    char *aptr = malloc(BIN_ARGS_MAXLEN);
     char *tmp = malloc(str_len);
-    AppAttributes_t *attr = calloc(1, 150);
+    AppAttributes_t *attr = calloc(1, sizeof(AppAttributes_t));
     strncpy(tmp, sptr, str_len);
+    cptr = strtok_r(tmp, " ", &tmp);
+    //printf("%s\n",cptr);
+    if(strlen(cptr) <= BIN_FILE_NAME_MAXLEN)
+        strcpy(attr->binName, cptr);
+    else
+        goto end;
+
+    /* get the attaributes for the application */
     while(cptr = strtok_r(tmp, " ", &tmp)){
         printf("%s\n",cptr);
-        //strcpy(attr->binName, cptr);
         if(*cptr == '-')
         {
-            printf("- is reached\n");
+            memcpy(aptr, cptr, min(BIN_ARGS_MAXLEN, str_len));
+            //printf("- is reached\n");
             if(cptr[1] == 'd')
             {
-                printf("-d is reached\n");
-                //memcpy(attr->binPath, strtok_r(cptr, "\"", &cptr), strlen(cptr)-3);
+                //printf("-d is reached\n");
+                aptr = strtok_r(aptr+3, "\"", &aptr);        
+                memcpy(attr->binPath, aptr, strlen(aptr));
             }
             if(cptr[1] == 'a'){
-                printf("-a is reached\n");
-                //memcpy(attr->arguments, (cptr+2), strlen(cptr)-3);
+                //printf("-a is reached\n");
+                aptr = strtok_r(aptr+3, "\"", &aptr);  
+                memcpy(attr->arguments, aptr, strlen(aptr));
             }
             if(cptr[1] == 'u'){
                 //printf("-u is reached\n");
                 attr->uid = atoi(cptr+2);
-                printf("UID: %d\n", attr->uid);
+                //printf("UID: %d\n", attr->uid);
             }
             if(cptr[1] == 'g'){
                 //printf("-g is reached\n");
                 attr->gid = atoi(cptr+2);
-                printf("GID: %d\n", attr->gid);
+                //printf("GID: %d\n", attr->gid);
             }
         }
     }
-    /*
+
     printf("Bin Name: %s\n",attr->binName);
     printf("Bin Path: %s\n",attr->binPath);
     printf("Arguments: %s\n",attr->arguments);
     printf("UID: %d\n",attr->uid);
     printf("GID: %d\n",attr->gid);
-    */
+    run_app(attr);
+    
+end:
+    free(aptr);
+    free(cptr);
+    free(tmp);
+    exit(0);
 }
 
 static void run_app(AppAttributes_t *appAttr)
 {
     pid_t pid;
     char *binFile;
+    char * const* name = "App1";
 
-    binFile = appAttr->binName;
-    
+    binFile = strcat(appAttr->binPath, appAttr->binName);
+    printf("Full path is : %s\n", appAttr->binPath);
 
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
@@ -183,9 +210,11 @@ static void run_app(AppAttributes_t *appAttr)
     //posix_spawnattr_setpgroup(&attr, );
     //posix_spawnattr_set
 
-    if(posix_spawnp(&pid, binFile, NULL, &attr, &appAttr->arguments, NULL))
+    if(posix_spawnp(&pid, appAttr->binPath, NULL, &attr, "Name", NULL))
     {
         perror("spawn failed");
         exit(0);
     }
+    else
+        printf("Process spawned with pid %d\n", pid);
 }

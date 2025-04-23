@@ -1,5 +1,5 @@
 $
 
-# app.bin -d"/usr/local/bin" -u1000 -g1000 -a"-help"
+# app.bin -d"/home/eby/GIT/AppManager/Test/" -u1000 -g1000 -a"-help"
 
 $
