@@ -5,11 +5,14 @@
 #include "AppManager.h"
 #include <stdbool.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 
 #define BIN_FILE_NAME_MAXLEN  50U
 #define BIN_PATH_MAXLEN      150U
 #define BIN_ARGS_MAXLEN      250U
+#define MAX_ARGS               5U
 
 #define min(a,b)  (a < b ? a : b)
       
@@ -17,7 +20,8 @@
 typedef struct{
     char binName[BIN_FILE_NAME_MAXLEN];
     char binPath[BIN_PATH_MAXLEN];
-    char arguments[BIN_ARGS_MAXLEN];
+    char arguments[MAX_ARGS][BIN_ARGS_MAXLEN];
+    char environ[1][10];
     uint32_t uid;
     uint32_t gid;
     uint32_t pid;
@@ -142,10 +146,13 @@ static void parse_attributes(char *sptr, unsigned int str_len)
     char *tmp = malloc(str_len);
     AppAttributes_t *attr = calloc(1, sizeof(AppAttributes_t));
     strncpy(tmp, sptr, str_len);
-    cptr = strtok_r(tmp, " ", &tmp);
+    cptr = strtok_r(tmp, " ", &tmp); // looks like memory will be auto-freed after all tokens are extracted
     //printf("%s\n",cptr);
     if(strlen(cptr) <= BIN_FILE_NAME_MAXLEN)
+    {
         strcpy(attr->binName, cptr);
+        strcpy(attr->arguments[0], cptr);
+    }
     else
         goto end;
 
@@ -164,8 +171,11 @@ static void parse_attributes(char *sptr, unsigned int str_len)
             }
             if(cptr[1] == 'a'){
                 //printf("-a is reached\n");
-                aptr = strtok_r(aptr+3, "\"", &aptr);  
-                memcpy(attr->arguments, aptr, strlen(aptr));
+                aptr = strtok_r(aptr+3, "\"", &aptr);
+
+                memcpy(attr->arguments[1], aptr, strlen(aptr));
+
+                *attr->arguments[2] = NULL;
             }
             if(cptr[1] == 'u'){
                 //printf("-u is reached\n");
@@ -182,7 +192,9 @@ static void parse_attributes(char *sptr, unsigned int str_len)
 
     printf("Bin Name: %s\n",attr->binName);
     printf("Bin Path: %s\n",attr->binPath);
-    printf("Arguments: %s\n",attr->arguments);
+    printf("Arguments: %s\n",attr->arguments[0]);
+    printf("Arguments: %s\n",attr->arguments[1]);
+    ///printf("Arguments: %s\n",attr->arguments[0]);
     printf("UID: %d\n",attr->uid);
     printf("GID: %d\n",attr->gid);
     run_app(attr);
@@ -190,15 +202,17 @@ static void parse_attributes(char *sptr, unsigned int str_len)
 end:
     free(aptr);
     free(cptr);
-    free(tmp);
+    //free(tmp);
     exit(0);
 }
 
 static void run_app(AppAttributes_t *appAttr)
 {
     pid_t pid;
+    int status;
     char *binFile;
     char * const* name = "App1";
+    //char *argv[] = {"app.bin", "-help", NULL};
 
     binFile = strcat(appAttr->binPath, appAttr->binName);
     printf("Full path is : %s\n", appAttr->binPath);
@@ -210,11 +224,24 @@ static void run_app(AppAttributes_t *appAttr)
     //posix_spawnattr_setpgroup(&attr, );
     //posix_spawnattr_set
 
-    if(posix_spawnp(&pid, appAttr->binPath, NULL, &attr, "Name", NULL))
+    status = posix_spawnp(&pid, appAttr->binPath, NULL, &attr, &appAttr->arguments, appAttr->environ);
+    if (status == 0)
     {
-        perror("spawn failed");
-        exit(0);
+        printf("Child PID : %d\n", pid);
+        do
+        {
+            if(waitpid(pid, &status, 0) != -1){
+                printf("Child Status %d\n", WEXITSTATUS(status));
+            }
+            else{
+                perror("waitpid failed\n");
+                exit(1);
+            }
+
+        } while (!WIFEXITED(status) && !WEXITSTATUS(status));
     }
     else
-        printf("Process spawned with pid %d\n", pid);
+    {
+        printf("spawn failed: %s\n", strerror(status));
+    }
 }
