@@ -143,7 +143,10 @@ static bool_t parse_app(FILE *fd)
     #endif
     #if 1
     bool sof_marker = false;
-    sptr = calloc(1, 200);
+    unsigned int idx = 0U;
+    unsigned int p_idx;
+    // somehow char **dsptr = calloc(1, 4096) was causing a segmentation fault. need to find the reason
+    char dsptr[4][1024];
     if(fd != NULL){
         while(fgets(tmpBuf, 1024, fd)){
             printf("%s\n", tmpBuf);
@@ -153,11 +156,18 @@ static bool_t parse_app(FILE *fd)
             }
             if((sof_marker == true) && (tmpBuf[0] == '#')){
                 tmpBuf++;
-                strncpy(sptr, tmpBuf, strlen(tmpBuf));
-                printf("op: %s\n", sptr);
-                parse_attributes(sptr, strlen(sptr));
-            }
+                strcpy(dsptr[idx], tmpBuf);
+                printf("op: %s\n", dsptr[idx]);
+                idx++;
+            } 
         }
+    }
+    printf("number of Apps configured is %d\n", idx);
+    for(p_idx = 0U; p_idx < idx; p_idx++)
+    {
+        // This parses only once.Need to find the rason and fix
+        parse_attributes(dsptr[p_idx], strlen(dsptr[p_idx]));
+        printf("App started\n");
     }
     #endif
 
@@ -242,7 +252,7 @@ end:
     //free(aptr);
     free(cptr);
     //free(tmp);
-    exit(0);
+    //exit(0);
 }
 
 static void run_app(AppAttributes_t *appAttr)
@@ -261,9 +271,11 @@ static void run_app(AppAttributes_t *appAttr)
     }
     argv[MAX_ARGS - 1] = NULL;
 
+    /*
     printf("Arg1: %s\n", argv[0]);
     printf("Arg2: %s\n", argv[1]);
     printf("Arg3: %s\n", argv[2]);
+    */
 
     binFile = strcat(appAttr->binPath, appAttr->binName);
     printf("Full path is : %s\n", appAttr->binPath);
