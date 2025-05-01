@@ -7,6 +7,10 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sched.h>
+#include <signal.h>
+#include "glueThread/glthread.h"
 
 
 #define BIN_FILE_NAME_MAXLEN  50U
@@ -25,17 +29,52 @@ typedef struct{
     uint32_t uid;
     uint32_t gid;
     uint32_t pid;
+    glthread_t attrGlue;
 }AppAttributes_t;
+
+
+GLTHREAD_TO_STRUCT(glue_dll_to_attr, AppAttributes_t, attrGlue);
+
+static AppAttributes_t *head = NULL; // this is root and will not have any data
+static AppAttributes_t *curr; // This always point to the latest update
+
 
 static bool_t parse_app(FILE *fd);
 static void run_app(AppAttributes_t *appAttr);
 static void print_options(void);
 static void parse_attributes(const char *sptr, unsigned int str_len);
+void signal_handler(int signum)
+{
+    pid_t status;
+    if(signum == SIGINT || signum == SIGABRT || signum == SIGTERM){
+        glthread_t *curr;
+        AppAttributes_t *attr;
+
+        ITERATE_GLTHREAD_BEGIN(&head->attrGlue, curr){
+            attr = glue_dll_to_attr(curr);
+            kill(attr->pid, SIGTERM);
+        do
+        {
+            if(waitpid(attr->pid, &status, WNOHANG) != -1){
+                printf("Child Status %d\n", WEXITSTATUS(status));
+            }
+            else{
+                perror("waitpid failed\n");
+                kill(attr->pid, SIGKILL);
+                //exit(1);
+            }
+
+        } while (!WIFEXITED(status) && !WEXITSTATUS(status));
+        }ITERATE_GLTHREAD_END(&head->attrGlue, curr);
+    }
+    exit(1);
+}
 
 int main(int argc, char **argv)
 {
     FILE *fd;
     char *filePath = NULL;
+    signal(SIGINT, signal_handler);
     if((argv[2] != NULL) && (strcmp(argv[1], "-c") == 0U) && (argc == 3U))
     {
         filePath = (char *)malloc(100);
@@ -59,6 +98,9 @@ int main(int argc, char **argv)
         goto end;
     }
     else{
+        head = (AppAttributes_t *)calloc(1, sizeof(AppAttributes_t));
+        init_glthread(&head->attrGlue);
+        curr = &head;
         parse_app(fd);
         fclose (fd);
     }
@@ -238,7 +280,8 @@ static void parse_attributes(const char *sptr, unsigned int str_len)
             }
         }
     }
-
+    glthread_add_next(&curr->attrGlue, &attr->attrGlue);
+    curr = attr;
     printf("Bin Name: %s\n",attr->binName);
     printf("Bin Path: %s\n",attr->binPath);
     printf("Arguments: %s\n",attr->arguments[0]);
@@ -246,6 +289,7 @@ static void parse_attributes(const char *sptr, unsigned int str_len)
     printf("Arguments: %s\n",*attr->arguments[2]);
     printf("UID: %d\n",attr->uid);
     printf("GID: %d\n",attr->gid);
+
     run_app(attr);
     
 end:
@@ -261,6 +305,8 @@ static void run_app(AppAttributes_t *appAttr)
     int status;
     unsigned int idx;
     char *binFile;
+    int schedPolicy;
+    struct sched_param param;
 
     // need to check why spawnp fialed when strcpy() is used to copy files to argv
     const char *argv[MAX_ARGS];
@@ -280,18 +326,35 @@ static void run_app(AppAttributes_t *appAttr)
     binFile = strcat(appAttr->binPath, appAttr->binName);
     printf("Full path is : %s\n", appAttr->binPath);
 
+    /* New process need not inherit the opened files of parent. This may also break the pipe between the
+       child process and console */
+    posix_spawn_file_actions_t file_actions;
+    posix_spawn_file_actions_init(&file_actions);
+    posix_spawn_file_actions_addopen(&file_actions, 0, "/dev/null", O_RDONLY, 0); // Redirect stdin
+    posix_spawn_file_actions_addopen(&file_actions, 1, "/dev/null", O_WRONLY, 0); // Redirect stdout
+    posix_spawn_file_actions_addopen(&file_actions, 2, "/dev/null", O_WRONLY, 0); // Redirect stderr
+
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSCHEDULER | POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETPGROUP);
-    //posix_spawnattr_setschedpolicy(&attr,);
-    //posix_spawnattr_setpgroup(&attr, );
-    //posix_spawnattr_set
+    /* detach the new process from its parent's session. This is required to detach it from the shell which launched it */
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSCHEDULER | POSIX_SPAWN_SETSCHEDPARAM | POSIX_SPAWN_SETSIGMASK);
+    #ifdef __QNX__
+    //https://www.qnx.com/developers/docs/6.5.0SP1.update/com.qnx.doc.neutrino_lib_ref/p/posix_spawnattr_setxflags.html
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID | POSIX_SPAWN_SETCRED);
+    posix_spawnattr_setsid(&attr);
+    posix_spawnattr_setcred(&attr, appAttr->uid, appAttr->gid);
+    #endif
+    schedPolicy = SCHED_RR;
+    param.sched_priority = 20;
+    /* spawn fails if sched param and/or policy is changed (in Ubuntu test setup) */
+    //posix_spawnattr_setschedpolicy(&attr, schedPolicy);
+    //posix_spawnattr_setschedparam(&attr, &param);
 
-    status = posix_spawnp(&pid, appAttr->binPath, NULL, &attr, argv, appAttr->environ);
+    status = posix_spawnp(&pid, appAttr->binPath, &file_actions, &attr, argv, appAttr->environ);
     if (status == 0)
     {
         printf("Child PID : %d\n", pid);
-        do
+        /*do
         {
             if(waitpid(pid, &status, 0) != -1){
                 printf("Child Status %d\n", WEXITSTATUS(status));
@@ -301,10 +364,17 @@ static void run_app(AppAttributes_t *appAttr)
                 exit(1);
             }
 
-        } while (!WIFEXITED(status) && !WEXITSTATUS(status));
+        } while (!WIFEXITED(status) && !WEXITSTATUS(status));*/
+        /* Detach the child process. This should have been done from the child process  */
+        setsid();
+        setuid(appAttr->uid);
+        setgid(appAttr->gid);
     }
     else
     {
         printf("spawn failed: %s\n", strerror(status));
     }
+
+    posix_spawn_file_actions_destroy(&file_actions);
+    posix_spawnattr_destroy(&attr);
 }
