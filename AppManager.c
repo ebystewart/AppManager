@@ -19,7 +19,13 @@
 #define MAX_ARGS               3U
 
 #define min(a,b)  (a < b ? a : b)
-      
+
+typedef enum {
+    NEW = 0,
+    RUNNING,
+    TERMINATED,
+    ZOMBIE
+}proc_state_e;
 
 typedef struct{
     char binName[BIN_FILE_NAME_MAXLEN];
@@ -29,6 +35,7 @@ typedef struct{
     uint32_t uid;
     uint32_t gid;
     uint32_t pid;
+    proc_state_e state;
     glthread_t attrGlue;
 }AppAttributes_t;
 
@@ -36,7 +43,7 @@ typedef struct{
 GLTHREAD_TO_STRUCT(glue_dll_to_attr, AppAttributes_t, attrGlue);
 
 static AppAttributes_t *head = NULL; // this is root and will not have any data
-static AppAttributes_t *curr; // This always point to the latest update
+//static AppAttributes_t *curr; // This always point to the latest update
 
 
 static bool_t parse_app(FILE *fd);
@@ -46,28 +53,60 @@ static void parse_attributes(const char *sptr, unsigned int str_len);
 void signal_handler(int signum)
 {
     pid_t status;
+    printf("Error: Signal handler called\n");
     if(signum == SIGINT || signum == SIGABRT || signum == SIGTERM){
         glthread_t *curr;
         AppAttributes_t *attr;
+        printf("Error: Process termination requested\n");
 
         ITERATE_GLTHREAD_BEGIN(&head->attrGlue, curr){
-            attr = glue_dll_to_attr(curr);
-            kill(attr->pid, SIGTERM);
-        do
-        {
-            if(waitpid(attr->pid, &status, WNOHANG) != -1){
-                printf("Child Status %d\n", WEXITSTATUS(status));
-            }
-            else{
-                perror("waitpid failed\n");
-                kill(attr->pid, SIGKILL);
-                //exit(1);
-            }
 
-        } while (!WIFEXITED(status) && !WEXITSTATUS(status));
+            attr = glue_dll_to_attr(curr);
+            printf("Info: Sending kill request to pid %d\n",attr->pid);
+            /* When parent terminates, kill the child processes too, 
+               so that the child processes do not become zombies */
+            if(attr->state == RUNNING || attr == NULL){
+                kill(attr->pid, SIGTERM);
+                do
+                {
+                    if (waitpid(attr->pid, &status, WNOHANG) != -1)
+                    {
+                        printf("Child Status %d\n", WEXITSTATUS(status));
+                    }
+                    else
+                    {
+                        perror("waitpid failed\n");
+                        kill(attr->pid, SIGKILL);
+                        // exit(1);
+                    }
+
+                } while (!WIFEXITED(status) && !WEXITSTATUS(status));
+                free(attr);
+            }  
         }ITERATE_GLTHREAD_END(&head->attrGlue, curr);
+        free(head);
     }
     exit(1);
+}
+
+/* Handle when a child process terminates */
+void sigchld_handler(int sig)
+{
+    pid_t pid;
+    int status;
+    glthread_t *curr;
+    AppAttributes_t *attr;
+    while((pid = waitpid(-1, &status, WNOHANG)) <= 0U);
+    ITERATE_GLTHREAD_BEGIN(&head->attrGlue, curr){
+        attr = glue_dll_to_attr(curr);
+        if(pid == attr->pid)
+        {
+            remove_glthread(curr);
+            attr->state = TERMINATED;
+            free(attr);
+        }
+    }ITERATE_GLTHREAD_END(&head->attrGlue, curr);
+    printf("Error: child process with PID : %d terminated\n", pid);
 }
 
 int main(int argc, char **argv)
@@ -75,6 +114,7 @@ int main(int argc, char **argv)
     FILE *fd;
     char *filePath = NULL;
     signal(SIGINT, signal_handler);
+    signal(SIGCHLD, sigchld_handler);
     if((argv[2] != NULL) && (strcmp(argv[1], "-c") == 0U) && (argc == 3U))
     {
         filePath = (char *)malloc(100);
@@ -100,12 +140,13 @@ int main(int argc, char **argv)
     else{
         head = (AppAttributes_t *)calloc(1, sizeof(AppAttributes_t));
         init_glthread(&head->attrGlue);
-        curr = &head;
+        //curr = &head;
         parse_app(fd);
         fclose (fd);
     }
     /* This is to support one entry one exit */   
     end:
+        while(1);
         exit(0);   
     return 0;
 }
@@ -280,8 +321,8 @@ static void parse_attributes(const char *sptr, unsigned int str_len)
             }
         }
     }
-    glthread_add_next(&curr->attrGlue, &attr->attrGlue);
-    curr = attr;
+    glthread_add_next(&head->attrGlue, &attr->attrGlue);
+    //curr = attr;
     printf("Bin Name: %s\n",attr->binName);
     printf("Bin Path: %s\n",attr->binPath);
     printf("Arguments: %s\n",attr->arguments[0]);
@@ -337,7 +378,8 @@ static void run_app(AppAttributes_t *appAttr)
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     /* detach the new process from its parent's session. This is required to detach it from the shell which launched it */
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSCHEDULER | POSIX_SPAWN_SETSCHEDPARAM | POSIX_SPAWN_SETSIGMASK);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSCHEDULER | POSIX_SPAWN_SETSCHEDPARAM | \
+                                    POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_RESETIDS);
     #ifdef __QNX__
     //https://www.qnx.com/developers/docs/6.5.0SP1.update/com.qnx.doc.neutrino_lib_ref/p/posix_spawnattr_setxflags.html
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID | POSIX_SPAWN_SETCRED);
@@ -349,11 +391,14 @@ static void run_app(AppAttributes_t *appAttr)
     /* spawn fails if sched param and/or policy is changed (in Ubuntu test setup) */
     //posix_spawnattr_setschedpolicy(&attr, schedPolicy);
     //posix_spawnattr_setschedparam(&attr, &param);
+    //posix_spawnattr_setpgroup(&attr, (pid_t)appAttr->gid);
 
     status = posix_spawnp(&pid, appAttr->binPath, &file_actions, &attr, argv, appAttr->environ);
     if (status == 0)
     {
-        printf("Child PID : %d\n", pid);
+        appAttr->pid = pid;
+        appAttr->state = RUNNING;
+        printf("Child PID : %d\n", appAttr->pid);
         /*do
         {
             if(waitpid(pid, &status, 0) != -1){
@@ -367,8 +412,8 @@ static void run_app(AppAttributes_t *appAttr)
         } while (!WIFEXITED(status) && !WEXITSTATUS(status));*/
         /* Detach the child process. This should have been done from the child process  */
         setsid();
-        setuid(appAttr->uid);
-        setgid(appAttr->gid);
+        //setuid(appAttr->uid);
+        //setgid(appAttr->gid);
     }
     else
     {
